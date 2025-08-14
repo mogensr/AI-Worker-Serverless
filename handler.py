@@ -1,5 +1,4 @@
 import os
-import re
 import shlex
 import json
 import subprocess
@@ -18,10 +17,10 @@ log = logging.getLogger("ma_sam2_worker")
 # ---------------- Globals / model state ----------------
 MODEL_READY = False
 MATANYONE_AVAILABLE = False
-MATANYONE_API = None  # Python API object if available
+MATANYONE_API = None
 
 SAM2_AVAILABLE = False
-SAM2_PREDICTOR = None  # SAM2 Heavy image predictor
+SAM2_PREDICTOR = None  # SAM2ImagePredictor
 
 # ---------------- Helpers ----------------
 def ensure_dir(p: str):
@@ -63,9 +62,6 @@ def run_cmd(cmd: str, allow_fail: bool = False) -> Tuple[int, str]:
     return proc.returncode, out
 
 def probe_video(path: str) -> Tuple[float, int, int, float]:
-    """
-    Return (duration_sec, width, height, fps) via ffprobe.
-    """
     cmd = (
         f'ffprobe -v error -select_streams v:0 '
         f'-show_entries stream=width,height,avg_frame_rate '
@@ -93,26 +89,25 @@ def detect_nvenc() -> bool:
 # ---------------- SAM2: mask on first frame ----------------
 def extract_first_frame(src_mp4: str, out_png: str) -> str:
     ensure_dir(os.path.dirname(out_png))
-    # -frames:v 1: only first frame
     run_cmd(f'ffmpeg -y -i "{src_mp4}" -frames:v 1 "{out_png}"')
     return out_png
 
 def sam2_init_heavy() -> None:
     """
-    Initialize SAM2 Heavy on CUDA if available, loading weights baked in the image.
+    Initialize SAM2 on CUDA if available, weights are pre-fetched in /models/hf-cache.
     """
     global SAM2_AVAILABLE, SAM2_PREDICTOR
     try:
         import torch
         from sam2.sam2_image_predictor import SAM2ImagePredictor
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        # <<< Load from local baked path >>>
+        # Load from HF snapshot; from_pretrained will hit $HF_HOME
         SAM2_PREDICTOR = SAM2ImagePredictor.from_pretrained(
-            "/models/sam2-hiera-large",
+            "facebook/sam2-hiera-large",
             device=device
         )
         SAM2_AVAILABLE = True
-        log.info("✅ SAM2 Heavy loaded (device=%s) from /models/sam2-hiera-large.", device)
+        log.info("✅ SAM2 loaded (device=%s).", device)
     except Exception as e:
         SAM2_AVAILABLE = False
         SAM2_PREDICTOR = None
@@ -120,7 +115,8 @@ def sam2_init_heavy() -> None:
 
 def sam2_mask(image_path: str) -> str:
     """
-    Run SAM2 'predict_everything' on a single image and save a combined mask (uint8 PNG, 0/255).
+    Use SAM2 Automatic Mask Generator on a single image and save one-person mask (uint8 PNG, 0/255).
+    Heuristic: pick largest plausible mask by area.
     """
     if not (SAM2_AVAILABLE and SAM2_PREDICTOR):
         raise RuntimeError("SAM2 not initialized")
@@ -129,19 +125,43 @@ def sam2_mask(image_path: str) -> str:
     import numpy as np
     import cv2
 
-    image = Image.open(image_path).convert("RGB")
-    np_img = np.array(image)
+    # AMG lives in sam2; class name per docs
+    try:
+        from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+    except Exception as e:
+        raise RuntimeError(f"SAM2 AMG not available: {e}")
 
-    # 'predict_everything' returns a list of results with .mask attributes
-    masks = SAM2_PREDICTOR.predict_everything(image, verbose=False)
+    image = np.array(Image.open(image_path).convert("RGB"))
+    amg = SAM2AutomaticMaskGenerator(SAM2_PREDICTOR)
+    masks = amg.generate(image) or []
 
-    if masks:
-        combined = np.zeros(np_img.shape[:2], dtype=np.uint8)
-        for m in masks:
-            combined = np.logical_or(combined, getattr(m, "mask", None))
-        mask_final = (combined.astype(np.uint8) * 255)
+    if len(masks) == 0:
+        # No masks -> return all zeros
+        mask_final = np.zeros(image.shape[:2], dtype=np.uint8)
     else:
-        mask_final = np.zeros(np_img.shape[:2], dtype=np.uint8)
+        # Choose the largest reasonable area (1%..80%) as the "person"
+        H, W = image.shape[:2]
+        total = H * W
+        best = None
+        best_area = 0
+        for m in masks:
+            seg = m.get("segmentation", None)
+            if seg is None:
+                continue
+            area = int(m.get("area", int(seg.sum())))
+            area_ratio = area / float(total)
+            if 0.01 <= area_ratio <= 0.80 and area > best_area:
+                best = seg
+                best_area = area
+        if best is None:
+            # Fallback: just take the largest
+            best = max(masks, key=lambda x: x.get("area", 0)).get("segmentation")
+        mask_final = (best.astype(np.uint8) * 255)
+
+        # Light morphology for cleaner edges
+        kernel = np.ones((3, 3), np.uint8)
+        mask_final = cv2.morphologyEx(mask_final, cv2.MORPH_OPEN, kernel, iterations=1)
+        mask_final = cv2.morphologyEx(mask_final, cv2.MORPH_CLOSE, kernel, iterations=1)
 
     mask_path = image_path.rsplit(".", 1)[0] + "_mask.png"
     cv2.imwrite(mask_path, mask_final)
@@ -153,7 +173,7 @@ def cold_start():
     Load MatAnyone and SAM2 from local baked paths (no network),
     enable CUDA perf tweaks, and stay fault-tolerant.
     """
-    global MODEL_READY, MATANYONE_AVAILABLE, MATANYONE_API, SAM2_AVAILABLE, SAM2_PREDICTOR
+    global MODEL_READY, MATANYONE_AVAILABLE, MATANYONE_API
     if MODEL_READY:
         return
 
@@ -168,10 +188,11 @@ def cold_start():
     except Exception as e:
         log.warning("Torch perf setup skipped: %s", e)
 
-    # ---- MatAnyone from local path baked in Docker (/models/matanyone) ----
+    # ---- MatAnyone from HF snapshot baked in Docker (/models/matanyone) ----
     try:
         from matanyone import InferenceCore
-        MATANYONE_API = InferenceCore("/models/matanyone")  # local path
+        # InferenceCore accepts an HF repo ID OR a local snapshot path.
+        MATANYONE_API = InferenceCore("/models/matanyone")
         MATANYONE_AVAILABLE = True
         log.info("✅ MatAnyone loaded from /models/matanyone")
     except Exception as e:
@@ -179,7 +200,7 @@ def cold_start():
         MATANYONE_API = None
         log.warning("MatAnyone init failed (will continue): %s", e)
 
-    # ---- SAM2 from local path baked in Docker (/models/sam2-hiera-large) ----
+    # ---- SAM2 ----
     sam2_init_heavy()
 
     MODEL_READY = True
@@ -187,10 +208,6 @@ def cold_start():
 # ---------------- MatAnyone wrappers ----------------
 def run_matanyone_python(input_mp4: str, out_dir: str, max_size: int,
                          mask_path: Optional[str]) -> Tuple[str, str]:
-    """
-    Run MatAnyone via Python API and return (foreground_mp4, alpha_mp4).
-    Supports external mask_path if your version allows it.
-    """
     if MATANYONE_API is None:
         raise RuntimeError("MatAnyone API not initialized")
 
@@ -201,7 +218,7 @@ def run_matanyone_python(input_mp4: str, out_dir: str, max_size: int,
         save_frames=False
     )
     if mask_path:
-        kwargs["mask_path"] = mask_path  # external SAM2 mask (if supported)
+        kwargs["mask_path"] = mask_path  # external SAM2 mask
 
     result = MATANYONE_API.process_video(**kwargs)
 
@@ -219,10 +236,6 @@ def run_matanyone_python(input_mp4: str, out_dir: str, max_size: int,
 
 def run_matanyone_cli(input_mp4: str, out_dir: str, max_size: int,
                       mask_path: Optional[str]) -> Tuple[str, str]:
-    """
-    CLI fallback. Update CLI flags if your version uses different names.
-    Tries to include --mask_path when possible.
-    """
     ensure_dir(out_dir)
     base = f'--video "{input_mp4}" --out_dir "{out_dir}" --max_size {max_size}'
     if mask_path:
@@ -248,12 +261,6 @@ def run_matanyone_cli(input_mp4: str, out_dir: str, max_size: int,
 def compose_video(fg_mp4: str, alpha_mp4: str, bg_img: str,
                   duration: float, out_mp4: str, src_video_for_audio: str,
                   use_nvenc: bool) -> str:
-    """
-    1) Loop background image to a video (same duration, 30fps)
-    2) Alpha merge => RGBA
-    3) Overlay RGBA on background
-    4) Remux original audio
-    """
     dur = max(0.1, duration)
     tmp_bg = os.path.join(os.path.dirname(out_mp4), "bg_loop.mp4")
     run_cmd(
