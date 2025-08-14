@@ -23,7 +23,8 @@ ENV PIP_NO_CACHE_DIR=1 \
     CUDA_VISIBLE_DEVICES=0 \
     HF_HOME=/models/hf-cache \
     TRANSFORMERS_CACHE=/models/hf-cache \
-    TORCH_HOME=/models/torch-cache
+    TORCH_HOME=/models/torch-cache \
+    PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True,max_split_size_mb:64
 
 # ---- Upgrade pip toolchain ----
 RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
@@ -44,11 +45,13 @@ RUN set -eux; \
         python -m pip install --no-cache-dir "${PKG}"; \
     done < /tmp/reqs.clean
 
-# ---- Install SAM2 & MatAnyone (from git) ----
+# ---- Install SAM2 & MatAnyone (from git, pinned) ----
+# Pin SAM2 to a pre-SAM2.1 commit (2024-08-07) compatible with Torch 2.3.x
 RUN python -m pip install --no-cache-dir \
-    git+https://github.com/facebookresearch/segment-anything-2.git#egg=segment-anything-2 \
- && python -m pip install --no-cache-dir \
-    git+https://github.com/pq-yang/MatAnyone.git#egg=matanyone
+    git+https://github.com/facebookresearch/sam2.git@6186d15#egg=sam2
+# Pin MatAnyone to v1.0.0 release
+RUN python -m pip install --no-cache-dir \
+    git+https://github.com/pq-yang/MatAnyone.git@v1.0.0#egg=matanyone
 
 # ---- Optional: Hugging Face token for private repos ----
 # Build with: --build-arg HF_TOKEN=hf_xxx (if needed)
@@ -66,14 +69,14 @@ if token:
     except Exception:
         pass
 
-# SAM2
+# SAM2 (will be found by .from_pretrained via HF cache)
 snapshot_download(
     repo_id="facebook/sam2-hiera-large",
     local_dir="/models/sam2-hiera-large",
     local_dir_use_symlinks=False
 )
 
-# MatAnyone
+# MatAnyone (HF assets used by InferenceCore)
 snapshot_download(
     repo_id="PeiqingYang/MatAnyone",
     local_dir="/models/matanyone",
