@@ -1,24 +1,42 @@
-# Step 1: Start with a specific, stable Python version
-FROM python:3.10-slim
+# Use CUDA-enabled base image for GPU support
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
 
-# Step 2: Install system-level dependencies, including Git and build tools
-RUN apt-get update && apt-get install -y git build-essential
+# Install Python and system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.10 \
+    python3.10-venv \
+    python3-pip \
+    git \
+    build-essential \
+    wget \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# Step 3: Set the working directory inside the container
+# Set Python 3.10 as default
+RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
+
 WORKDIR /app
 
-# Step 4: Copy the requirements file first to leverage Docker's caching
+# Upgrade pip and install basic packages first
+RUN python -m pip install --upgrade pip setuptools wheel
+
+# Copy and install requirements
 COPY requirements.txt .
 
-# Step 5: Install the Python packages
-RUN pip install --no-cache-dir -r requirements.txt
+# Install PyTorch with CUDA support first
+RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
-# Step 6: Copy the rest of your application code
+# Install requirements from file (includes MatAnyone dependencies)
+RUN pip install -r requirements.txt
+
+# Copy application code
 COPY . .
 
-# Step 7: Expose the port that FastAPI will run on
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV CUDA_VISIBLE_DEVICES=0
+
 EXPOSE 8000
 
-# Step 8: Define the command to run your application
-# Uvicorn is a high-performance server for FastAPI
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
