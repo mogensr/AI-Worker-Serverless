@@ -22,14 +22,23 @@ MATANYONE_PROCESSOR = None
 
 # Load SAM2 for person segmentation
 try:
-    from sam2.sam2_image_predictor import SAM2ImagePredictor
+    # Try both possible import names for SAM2
+    try:
+        from sam2.sam2_image_predictor import SAM2ImagePredictor
+    except ImportError:
+        from sam_2.sam2_image_predictor import SAM2ImagePredictor
+    
     SAM2_PREDICTOR = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-large")
     SAM2_AVAILABLE = True
     logger.info("✅ SAM2 (Large Model) loaded successfully")
 except ImportError:
     logger.warning("⚠️ SAM2 not available. Please ensure it's installed via requirements.txt.")
+    SAM2_AVAILABLE = False
+    SAM2_PREDICTOR = None
 except Exception as e:
     logger.error(f"🚨 Error loading SAM2 model: {e}")
+    SAM2_AVAILABLE = False
+    SAM2_PREDICTOR = None
 
 # Load MatAnyone for background replacement
 try:
