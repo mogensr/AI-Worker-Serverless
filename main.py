@@ -163,6 +163,11 @@ def replace_background_matanyone(image_np, mask_np, background_image_np=None):
 def read_root():
     return {"message": "AI Worker is running"}
 
+@app.get("/health")
+def health_check():
+    """Simple health check for RunPod"""
+    return {"status": "healthy"}
+
 @app.post("/segment/", response_class=Response)
 async def segment_image(file: UploadFile = File(...)):
     """Legacy endpoint - returns only the segmentation mask"""
