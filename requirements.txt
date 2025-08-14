@@ -14,7 +14,7 @@ timm==1.0.19
 
 # --- HF / Transformers / weights ---
 transformers==4.43.3
-# Pin to a modern hub that plays nice with transformers 4.43 and timm 1.0.x
+# Pin hub high enough to satisfy both timm 1.0.x and transformers 4.43.x
 huggingface-hub==0.34.4
 safetensors==0.6.2
 
