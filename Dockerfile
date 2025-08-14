@@ -1,55 +1,46 @@
-# GPU image (CUDA 12.1)
+# ==== GPU base (CUDA 12.1, Ubuntu 22.04) ====
 FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
 
-# System deps
+# ---- System packages ----
+# ffmpeg til video I/O, libgl/libglib for OpenCV, cmake+ninja til evt. build af extensions
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10 python3.10-venv python3-pip \
-    git build-essential wget curl ffmpeg unzip \
-    libgl1 libglib2.0-0 cmake ninja-build \
-    && rm -rf /var/lib/apt/lists/*
+    git build-essential cmake ninja-build \
+    ffmpeg unzip wget curl \
+    libgl1 libglib2.0-0 \
+ && rm -rf /var/lib/apt/lists/*
 
-# Set Python 3.10 default
+# Gør py310 til default "python"/"python3"
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1 \
  && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
 
 WORKDIR /app
 
-# Upgrade pip toolchain
+# ---- Env for hurtigere, renere builds og caches ----
+ENV PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1 \
+    CUDA_VISIBLE_DEVICES=0 \
+    HF_HOME=/root/.cache/huggingface \
+    TRANSFORMERS_CACHE=/root/.cache/huggingface/transformers \
+    TORCH_HOME=/root/.cache/torch
+
+# Opdatér toolchain
 RUN python -m pip install --upgrade pip setuptools wheel
 
-# Copy requirements first (cache layer)
+# ---- Torch (CUDA 12.1) først for at matche basen ----
+# Pin for stabilitet
+RUN python -m pip install \
+    torch==2.3.1 torchvision==0.18.1 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+# ---- Python dependencies ----
+# Indeholder også MatAnyone + SAM2 via git+ i requirements.txt
 COPY requirements.txt /app/requirements.txt
+RUN python -m pip install -r /app/requirements.txt
 
-# --- Install GPU Torch first (match CUDA 12.1) ---
-# Pin versions for stability (anbefalet)
-RUN python -m pip install --no-cache-dir \
-    torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121
-
-# --- Install remaining deps (incl. RunPod SDK) ---
-RUN python -m pip install --no-cache-dir -r /app/requirements.txt
-
-# --- Install MatAnyone + friends ---
-# Brug officiel repo (eller behold din fork, hvis tilsigtet)
-RUN git clone https://github.com/pq-yang/MatAnyone.git /tmp/MatAnyone && \
-    python -m pip install --no-cache-dir /tmp/MatAnyone && \
-    rm -rf /tmp/MatAnyone
-
-# Ekstra afhængigheder (VIGTIGT: citér >= kravene)
-RUN python -m pip install --no-cache-dir \
-    "omegaconf==2.3.0" "hydra-core==1.3.2" "easydict==0.1.10" \
-    "imageio==2.25.0" "huggingface-hub>=0.16.0" "safetensors>=0.3.0" \
-    "einops>=0.6.0" "scipy>=1.10.0" "av>=10.0.0"
-
-# SAM2 separat (kræver build tools; vi installerede cmake/ninja)
-RUN python -m pip install --no-cache-dir git+https://github.com/facebookresearch/segment-anything-2.git
-
-# Copy worker code
+# ---- Worker code ----
 COPY handler.py /app/handler.py
 COPY test_input.json /app/test_input.json
 
-# Runtime env
-ENV PYTHONUNBUFFERED=1
-ENV CUDA_VISIBLE_DEVICES=0
-
-# Serverless entrypoint
+# ---- Serverless entrypoint ----
 CMD ["python", "-u", "/app/handler.py"]
