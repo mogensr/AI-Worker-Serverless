@@ -3,9 +3,8 @@
     "video_url": "https://.../input.mp4",
     "background_url": "https://.../bg.jpg",
     "output_name": "result.mp4",
-    "run_sam2": "first",        // "none" | "first" | "keyframes" | "all"  (default: "first")
-    "keyframe_stride": 15,      // kun hvis run_sam2="keyframes" | "all"
-    "max_size": 1080,           // maks korteste side til MatAnyone (default 1080)
-    "use_nvenc": true           // forsøg GPU-encoding; fallback til libx264
+    "run_sam2": "first",       // "none" | "first"  (keyframes/all kan tilføjes senere)
+    "max_size": 1080,          // MatAnyone cap (anbefalet)
+    "use_nvenc": true          // brug GPU-encoding hvis muligt
   }
 }
