@@ -3,8 +3,8 @@
     "video_url": "https://.../input.mp4",
     "background_url": "https://.../bg.jpg",
     "output_name": "result.mp4",
-    "run_sam2": "first",       // "none" | "first"  (keyframes/all kan tilføjes senere)
-    "max_size": 1080,          // MatAnyone cap (anbefalet)
-    "use_nvenc": true          // brug GPU-encoding hvis muligt
+    "run_sam2": "first",
+    "max_size": 1080,
+    "use_nvenc": true
   }
 }
