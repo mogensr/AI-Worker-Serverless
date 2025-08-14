@@ -1,8 +1,5 @@
-# RunPod + web + utils
+# RunPod + utils
 runpod==1.7.0
-fastapi==0.111.0
-uvicorn[standard]==0.30.1
-python-multipart==0.0.9
 requests==2.32.3
 tqdm==4.66.4
 pillow==10.4.0
@@ -10,19 +7,15 @@ pillow==10.4.0
 # Numerics / CV
 numpy==1.26.4
 opencv-python-headless==4.10.0.84
-scipy==1.13.1
 einops==0.8.0
 
-# HF / transformers / weights
-transformers==4.43.3
+# HF / weights
 huggingface-hub==0.24.5
 safetensors==0.4.3
 omegaconf==2.3.0
 hydra-core==1.3.2
 easydict==0.1.10
-imageio==2.34.2
-av==12.1.0
 
-# MatAnyone + SAM2 fra Git (installeres via pip)
+# MatAnyone + SAM2 (pin gerne til commits for stabilitet)
 git+https://github.com/pq-yang/MatAnyone.git#egg=matanyone
 git+https://github.com/facebookresearch/segment-anything-2.git#egg=segment-anything-2
