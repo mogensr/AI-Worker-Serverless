@@ -2,59 +2,36 @@ import os
 import tempfile
 import runpod
 import requests
+import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
-import logging
 
-# Configure logging
+import numpy as np
+import cv2
+from PIL import Image
+
+# ---------------- Logging ----------------
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("matanyone-serverless")
 
-# ---------- Cold start: load models ----------
-SAM2_AVAILABLE = False
-SAM2_PREDICTOR = None
-MATANYONE_AVAILABLE = False
-MATANYONE_PROCESSOR = None
+# ---------------- Global model flags/state ----------------
 MODEL_READY = False
+SAM2_AVAILABLE = False
+MATANYONE_AVAILABLE = False
 
-def cold_start():
-    global MODEL_READY, SAM2_AVAILABLE, SAM2_PREDICTOR, MATANYONE_AVAILABLE, MATANYONE_PROCESSOR
-    if MODEL_READY:
-        return
-    
-    # Load SAM2
-    try:
-        try:
-            from sam2.sam2_image_predictor import SAM2ImagePredictor
-        except ImportError:
-            from sam_2.sam2_image_predictor import SAM2ImagePredictor
-        
-        SAM2_PREDICTOR = SAM2ImagePredictor.from_pretrained("facebook/sam2-hiera-large")
-        SAM2_AVAILABLE = True
-        logger.info("✅ SAM2 (Large Model) loaded successfully")
-    except Exception as e:
-        logger.error(f"🚨 Error loading SAM2: {e}")
-        SAM2_AVAILABLE = False
+# Placeholders for real model objects (når vi integrerer dem)
+SAM2_PREDICTOR = None
+MATANYONE_PROCESSOR = None
 
-    # Load MatAnyone
-    try:
-        from matanyone import InferenceCore
-        MATANYONE_PROCESSOR = InferenceCore("PeiqingYang/MatAnyone")
-        MATANYONE_AVAILABLE = True
-        logger.info("✅ MatAnyone processor loaded successfully")
-    except Exception as e:
-        logger.error(f"🚨 Error loading MatAnyone: {e}")
-        MATANYONE_AVAILABLE = False
-    
-    MODEL_READY = True
-
-# ---------- Utils ----------
+# ---------------- Utils ----------------
 def download_to_tmp(url: str, suffix: str) -> str:
-    resp = requests.get(url, stream=True, timeout=60)
-    resp.raise_for_status()
+    if not url:
+        return None
+    r = requests.get(url, stream=True, timeout=60)
+    r.raise_for_status()
     fd, path = tempfile.mkstemp(suffix=suffix)
     with os.fdopen(fd, "wb") as f:
-        for chunk in resp.iter_content(chunk_size=8192):
+        for chunk in r.iter_content(chunk_size=8192):
             if chunk:
                 f.write(chunk)
     return path
@@ -62,126 +39,189 @@ def download_to_tmp(url: str, suffix: str) -> str:
 def ensure_dir(p: str):
     Path(p).mkdir(parents=True, exist_ok=True)
 
-# ---------- SAM2 + MatAnyone Pipeline ----------
-def process_background_replacement(image_path: str, bg_path: Optional[str], out_path: str) -> None:
-    """Complete SAM2 + MatAnyone pipeline"""
-    from PIL import Image
-    import numpy as np
-    import cv2
-    
-    # Load image
-    image = Image.open(image_path).convert("RGB")
-    image_np = np.array(image)
-    
-    # Step 1: SAM2 segmentation
-    if SAM2_AVAILABLE and SAM2_PREDICTOR:
-        logger.info("🎯 Starting SAM2 person segmentation...")
-        everything_results = SAM2_PREDICTOR.predict_everything(image, verbose=False)
-        
-        if everything_results:
-            full_mask = np.zeros(image_np.shape[:2], dtype=np.uint8)
-            for mask_result in everything_results:
-                full_mask = np.logical_or(full_mask, mask_result.mask)
-            mask_np = full_mask.astype(np.uint8) * 255
-        else:
-            mask_np = np.zeros(image_np.shape[:2], dtype=np.uint8)
-    else:
-        raise Exception("SAM2 not available")
-    
-    # Step 2: MatAnyone background replacement
-    if MATANYONE_AVAILABLE and MATANYONE_PROCESSOR and bg_path:
-        logger.info("🎨 Starting MatAnyone background replacement...")
-        
-        # Create temporary video for MatAnyone
-        temp_dir = Path(tempfile.mkdtemp())
-        temp_video = temp_dir / "input.mp4"
-        h, w = image_np.shape[:2]
-        
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        out = cv2.VideoWriter(str(temp_video), fourcc, 1.0, (w, h))
-        frame_bgr = cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR)
-        out.write(frame_bgr)
-        out.release()
-        
-        # Save mask
-        mask_path = temp_dir / "mask.png"
-        cv2.imwrite(str(mask_path), mask_np)
-        
-        # Process with MatAnyone
-        foreground_path, alpha_path = MATANYONE_PROCESSOR.process_video(
-            input_path=str(temp_video),
-            mask_path=str(mask_path),
-            output_path=str(temp_dir),
-            max_size=1080,
-            save_frames=False
-        )
-        
-        # Read results and composite with background
-        bg_image = Image.open(bg_path).convert("RGB")
-        bg_np = np.array(bg_image)
-        bg_resized = cv2.resize(bg_np, (w, h))
-        
-        # Read alpha and foreground
-        alpha_cap = cv2.VideoCapture(alpha_path)
-        ret, alpha_frame = alpha_cap.read()
-        alpha_cap.release()
-        
-        fg_cap = cv2.VideoCapture(foreground_path)
-        ret, fg_frame = fg_cap.read()
-        fg_cap.release()
-        
-        if ret:
-            fg_frame = cv2.cvtColor(fg_frame, cv2.COLOR_BGR2RGB)
-            alpha_matte = cv2.cvtColor(alpha_frame, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
-            alpha_3ch = np.stack([alpha_matte] * 3, axis=-1)
-            result = (fg_frame * alpha_3ch + bg_resized * (1 - alpha_3ch)).astype(np.uint8)
-        else:
-            result = image_np
-        
-        # Cleanup
-        import shutil
-        shutil.rmtree(temp_dir, ignore_errors=True)
-    else:
-        # Just return original if no background or MatAnyone unavailable
-        result = image_np
-    
-    # Save result
-    result_image = Image.fromarray(result)
-    result_image.save(out_path, format='JPEG', quality=95)
+def pil_to_np(img: Image.Image) -> np.ndarray:
+    return np.array(img.convert("RGB"))
 
-# ---------- Handler ----------
+def np_to_pil(arr: np.ndarray) -> Image.Image:
+    return Image.fromarray(arr.astype(np.uint8))
+
+# ---------------- Cold start ----------------
+def cold_start():
+    """
+    Prøv at loade SAM2 og MatAnyone, men vær fejltolerant.
+    """
+    global MODEL_READY, SAM2_AVAILABLE, MATANYONE_AVAILABLE
+    global SAM2_PREDICTOR, MATANYONE_PROCESSOR
+
+    if MODEL_READY:
+        return
+
+    # --- SAM2 (BEST EFFORT) ---
+    try:
+        # TODO: Indsæt den rigtige import + load-måde når bekræftet.
+        # Eksempel (pseudo):
+        #   from sam2.predictor import Sam2Predictor
+        #   SAM2_PREDICTOR = Sam2Predictor.from_pretrained(checkpoint_path=...)
+        #   SAM2_AVAILABLE = True
+        # For nu kører vi uden hård afhængighed:
+        SAM2_AVAILABLE = False
+        SAM2_PREDICTOR = None
+        logger.info("SAM2 not initialized (placeholder).")
+    except Exception as e:
+        logger.warning(f"SAM2 load failed (ignored): {e}")
+        SAM2_AVAILABLE = False
+        SAM2_PREDICTOR = None
+
+    # --- MatAnyone (BEST EFFORT) ---
+    try:
+        # TODO: Indsæt korrekt API/CLI-kald og checkpoints.
+        #   fx: from matanyone.api import MatAnyoneRunner
+        #       MATANYONE_PROCESSOR = MatAnyoneRunner(weights=...)
+        MATANYONE_AVAILABLE = False
+        MATANYONE_PROCESSOR = None
+        logger.info("MatAnyone not initialized (placeholder).")
+    except Exception as e:
+        logger.warning(f"MatAnyone load failed (ignored): {e}")
+        MATANYONE_AVAILABLE = False
+        MATANYONE_PROCESSOR = None
+
+    MODEL_READY = True
+    logger.info("Cold start done. SAM2=%s, MatAnyone=%s", SAM2_AVAILABLE, MATANYONE_AVAILABLE)
+
+# ---------------- Basic compositing helpers ----------------
+def composite_foreground_over_background(fg_rgb: np.ndarray, alpha01: np.ndarray, bg_rgb: np.ndarray) -> np.ndarray:
+    """
+    fg_rgb: HxWx3 (uint8)
+    alpha01: HxW (float32, 0..1)
+    bg_rgb: HxWx3 (uint8) (resizes if needed)
+    """
+    h, w = fg_rgb.shape[:2]
+    if bg_rgb.shape[:2] != (h, w):
+        bg_rgb = cv2.resize(bg_rgb, (w, h), interpolation=cv2.INTER_LINEAR)
+    alpha3 = np.dstack([alpha01]*3)
+    out = fg_rgb.astype(np.float32) * alpha3 + bg_rgb.astype(np.float32) * (1.0 - alpha3)
+    return np.clip(out, 0, 255).astype(np.uint8)
+
+def grabcut_person_mask(rgb: np.ndarray) -> np.ndarray:
+    """
+    Meget simpel fallback-maske via GrabCut med en central ROI.
+    Returnerer binær maske (uint8 0/255).
+    """
+    h, w = rgb.shape[:2]
+    # central ROI
+    x0 = int(w * 0.15)
+    y0 = int(h * 0.10)
+    x1 = int(w * 0.85)
+    y1 = int(h * 0.90)
+    rect = (x0, y0, x1 - x0, y1 - y0)
+
+    mask = np.zeros((h, w), np.uint8)
+    bgdModel = np.zeros((1, 65), np.float64)
+    fgdModel = np.zeros((1, 65), np.float64)
+
+    cv2.grabCut(rgb, mask, rect, bgdModel, fgdModel, 5, cv2.GC_INIT_WITH_RECT)
+    # 0=BG, 2=PR_BG -> 0 | 2 = BG; 1=FG, 3=PR_FG -> 1 | 3 = FG
+    mask_bin = np.where((mask == 1) | (mask == 3), 255, 0).astype(np.uint8)
+
+    # let smoothing
+    mask_bin = cv2.medianBlur(mask_bin, 5)
+    return mask_bin
+
+# ---------------- Main pipeline ----------------
+def process_background_replacement(image_path: str, bg_path: Optional[str], out_path: str) -> Dict[str, Any]:
+    """
+    End-to-end: læs input, lav maske (SAM2/MatAnyone hvis muligt; ellers GrabCut),
+    komponer over baggrund, og gem output.
+    Returnerer diagnostic-info til response.
+    """
+    diag = {
+        "used_sam2": False,
+        "used_matanyone": False,
+        "fallback_grabcut": False
+    }
+
+    # load image
+    image = Image.open(image_path).convert("RGB")
+    rgb = pil_to_np(image)
+
+    # --- 1) Prøv SAM2 (TODO: indsæt rigtig inferens når klar) ---
+    mask_bin = None
+    if SAM2_AVAILABLE and SAM2_PREDICTOR is not None:
+        try:
+            # TODO: rigtig SAM2-kald; eksempel (pseudo):
+            # SAM2_PREDICTOR.set_image(rgb)  # afhænger af API
+            # masks = SAM2_PREDICTOR.predict_everything()  # eller tilsvarende
+            # mask_bin = aggregate_masks(masks)
+            raise NotImplementedError("SAM2 call not implemented yet.")
+        except Exception as e:
+            logger.warning(f"SAM2 inference failed, falling back. Err: {e}")
+            mask_bin = None
+    else:
+        logger.info("SAM2 unavailable; using fallback.")
+        mask_bin = None
+
+    # --- 2) Prøv MatAnyone (kun relevant for video—springes over i dette image-flow) ---
+    # NOTE: Din tidligere kode forsøgte at lave 1-frame video -> matting.
+    # Når du har et fungerende MatAnyone API/CLI, kan vi:
+    #  - konvertere billedet til 1-frame video
+    #  - køre MatAnyone for alpha matte
+    #  - læse alpha ud og composite
+    # For nu bruges det ikke for single image:
+    # diag["used_matanyone"] = True  # (når integreret)
+
+    # --- 3) Fallback: GrabCut ---
+    if mask_bin is None:
+        mask_bin = grabcut_person_mask(rgb)
+        diag["fallback_grabcut"] = True
+
+    # alpha fra binær maske
+    alpha01 = (mask_bin.astype(np.float32) / 255.0)
+
+    # hvis ingen baggrund -> behold original (eller læg hvid baggrund)
+    if not bg_path:
+        logger.info("No background provided; returning original image.")
+        out_img = rgb
+    else:
+        bg_img = Image.open(bg_path).convert("RGB")
+        bg_rgb = pil_to_np(bg_img)
+        out_img = composite_foreground_over_background(rgb, alpha01, bg_rgb)
+
+    # gem
+    ensure_dir(os.path.dirname(out_path))
+    np_to_pil(out_img).save(out_path, format="JPEG", quality=95)
+
+    return diag
+
+# ---------------- RunPod handler ----------------
 def handler(event: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Expected input:
+    Input:
     {
       "input": {
         "image_url": "https://.../input.jpg",
-        "background_url": "https://.../bg.jpg",    # optional
-        "output_name": "result.jpg"                # optional
+        "background_url": "https://.../bg.jpg",  # optional
+        "output_name": "result.jpg"               # optional
       }
     }
     """
     cold_start()
 
-    data = event.get("input", {}) or {}
+    data = event.get("input") or {}
     image_url = data.get("image_url")
     bg_url = data.get("background_url")
     out_name = data.get("output_name", "output.jpg")
 
     if not image_url:
-        return {"error": "Missing 'image_url' in input"}
+        return {"status": "error", "message": "Missing 'image_url' in input"}
 
     try:
-        # Download files
         in_image = download_to_tmp(image_url, suffix=".jpg")
         in_bg = download_to_tmp(bg_url, suffix=".jpg") if bg_url else None
 
-        # Output location
         ensure_dir("/tmp/outputs")
         out_path = f"/tmp/outputs/{out_name}"
 
-        # Process with SAM2 + MatAnyone
-        process_background_replacement(in_image, in_bg, out_path)
+        diag = process_background_replacement(in_image, in_bg, out_path)
 
         return {
             "status": "success",
@@ -189,11 +229,11 @@ def handler(event: Dict[str, Any]) -> Dict[str, Any]:
             "models_loaded": {
                 "sam2": SAM2_AVAILABLE,
                 "matanyone": MATANYONE_AVAILABLE
-            }
+            },
+            "pipeline": diag
         }
     except Exception as e:
-        logger.error(f"❌ Processing failed: {e}")
+        logger.exception("Processing failed")
         return {"status": "error", "message": str(e)}
 
-# Start serverless
 runpod.serverless.start({"handler": handler})
