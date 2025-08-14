@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git build-essential cmake ninja-build \
     ffmpeg unzip wget curl \
     libgl1 libglib2.0-0 libsm6 libxext6 \
+    libgomp1 \
  && rm -rf /var/lib/apt/lists/*
 
 # Make Python 3.10 default
@@ -17,6 +18,7 @@ WORKDIR /app
 
 # ---- Env (cache + CUDA) ----
 ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DEFAULT_TIMEOUT=120 \
     PYTHONUNBUFFERED=1 \
     CUDA_VISIBLE_DEVICES=0 \
     HF_HOME=/models/hf-cache \
@@ -24,21 +26,28 @@ ENV PIP_NO_CACHE_DIR=1 \
     TORCH_HOME=/models/torch-cache
 
 # ---- Upgrade pip toolchain ----
-RUN python -m pip install --upgrade pip setuptools wheel
+RUN python -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # ---- Torch (CUDA 12.1) first ----
-RUN python -m pip install \
+RUN python -m pip install --no-cache-dir \
     torch==2.3.1 torchvision==0.18.1 \
     --index-url https://download.pytorch.org/whl/cu121
 
 # ---- Python dependencies ----
 COPY requirements.txt /app/requirements.txt
-RUN python -m pip install -r /app/requirements.txt
+
+# Install requirements ONE BY ONE for clear error reporting
+RUN set -eux; \
+    grep -v '^\s*#' /app/requirements.txt | sed '/^\s*$/d' > /tmp/reqs.clean; \
+    while read -r PKG; do \
+        echo "=== Installing: ${PKG} ==="; \
+        python -m pip install --no-cache-dir "${PKG}"; \
+    done < /tmp/reqs.clean
 
 # ---- Install SAM2 & MatAnyone (from git) ----
-RUN python -m pip install \
+RUN python -m pip install --no-cache-dir \
     git+https://github.com/facebookresearch/segment-anything-2.git#egg=segment-anything-2 \
- && python -m pip install \
+ && python -m pip install --no-cache-dir \
     git+https://github.com/pq-yang/MatAnyone.git#egg=matanyone
 
 # ---- Optional: Hugging Face token for private repos ----
