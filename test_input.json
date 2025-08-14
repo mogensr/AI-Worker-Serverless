@@ -1,7 +1,7 @@
 {
   "input": {
-    "video_url": "https://.../input.mp4",
-    "background_url": "https://.../bg.jpg",
+    "video_url": "https://example.com/input.mp4",
+    "background_url": "https://example.com/bg.jpg",
     "output_name": "result.mp4",
     "run_sam2": "first",
     "max_size": 1080,
