@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+python-multipart
+git+https://github.com/facebookresearch/segment-anything-2.git#egg=sam2
+git+https://github.com/hustvl/MatAnyone.git#egg=matanyone
+torch
+torchvision
+transformers
