@@ -46,25 +46,25 @@ RUN python -m pip install \
 ARG HF_TOKEN=""
 
 # ---- Prefetch model weights into the image (no token persisted) ----
-RUN HF_TOKEN=$HF_TOKEN python - << 'PY'
+RUN HF_TOKEN=$HF_TOKEN python - <<'PY'
 import os
 from huggingface_hub import snapshot_download, login
 
-token = os.environ.get("HF_TOKEN", "")
+token = os.environ.get("HF_TOKEN") or ""
 if token:
     try:
         login(token=token)
     except Exception:
         pass
 
-# SAM2 (Meta)
+# SAM2
 snapshot_download(
     repo_id="facebook/sam2-hiera-large",
     local_dir="/models/sam2-hiera-large",
     local_dir_use_symlinks=False
 )
 
-# MatAnyone (PeiqingYang)
+# MatAnyone
 snapshot_download(
     repo_id="PeiqingYang/MatAnyone",
     local_dir="/models/matanyone",
@@ -78,4 +78,3 @@ COPY test_input.json /app/test_input.json
 
 # ---- Entrypoint (RunPod Serverless) ----
 CMD ["python", "-u", "/app/handler.py"]
-
