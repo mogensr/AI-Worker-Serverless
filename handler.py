@@ -93,25 +93,26 @@ def detect_nvenc() -> bool:
 # ---------------- SAM2: mask on first frame ----------------
 def extract_first_frame(src_mp4: str, out_png: str) -> str:
     ensure_dir(os.path.dirname(out_png))
-    # -frames:v 1: kun første frame
+    # -frames:v 1: only first frame
     run_cmd(f'ffmpeg -y -i "{src_mp4}" -frames:v 1 "{out_png}"')
     return out_png
 
 def sam2_init_heavy() -> None:
     """
-    Initialize SAM2 Heavy on CUDA if available (auto-download from HF hub).
+    Initialize SAM2 Heavy on CUDA if available, loading weights baked in the image.
     """
     global SAM2_AVAILABLE, SAM2_PREDICTOR
     try:
         import torch
         from sam2.sam2_image_predictor import SAM2ImagePredictor
         device = "cuda" if torch.cuda.is_available() else "cpu"
+        # <<< Load from local baked path >>>
         SAM2_PREDICTOR = SAM2ImagePredictor.from_pretrained(
-            "facebook/sam2-hiera-large",
+            "/models/sam2-hiera-large",
             device=device
         )
         SAM2_AVAILABLE = True
-        log.info("✅ SAM2 Heavy loaded (device=%s).", device)
+        log.info("✅ SAM2 Heavy loaded (device=%s) from /models/sam2-hiera-large.", device)
     except Exception as e:
         SAM2_AVAILABLE = False
         SAM2_PREDICTOR = None
@@ -148,7 +149,11 @@ def sam2_mask(image_path: str) -> str:
 
 # ---------------- Cold start ----------------
 def cold_start():
-    global MODEL_READY, MATANYONE_AVAILABLE, MATANYONE_API
+    """
+    Load MatAnyone and SAM2 from local baked paths (no network),
+    enable CUDA perf tweaks, and stay fault-tolerant.
+    """
+    global MODEL_READY, MATANYONE_AVAILABLE, MATANYONE_API, SAM2_AVAILABLE, SAM2_PREDICTOR
     if MODEL_READY:
         return
 
@@ -163,18 +168,18 @@ def cold_start():
     except Exception as e:
         log.warning("Torch perf setup skipped: %s", e)
 
-    # MatAnyone (Python API først; CLI fallback bruges senere)
+    # ---- MatAnyone from local path baked in Docker (/models/matanyone) ----
     try:
         from matanyone import InferenceCore
-        MATANYONE_API = InferenceCore("PeiqingYang/MatAnyone")
+        MATANYONE_API = InferenceCore("/models/matanyone")  # local path
         MATANYONE_AVAILABLE = True
-        log.info("✅ MatAnyone Python API loaded.")
+        log.info("✅ MatAnyone loaded from /models/matanyone")
     except Exception as e:
         MATANYONE_AVAILABLE = False
         MATANYONE_API = None
-        log.warning("MatAnyone Python API not available: %s", e)
+        log.warning("MatAnyone init failed (will continue): %s", e)
 
-    # SAM2 Heavy
+    # ---- SAM2 from local path baked in Docker (/models/sam2-hiera-large) ----
     sam2_init_heavy()
 
     MODEL_READY = True
@@ -183,8 +188,8 @@ def cold_start():
 def run_matanyone_python(input_mp4: str, out_dir: str, max_size: int,
                          mask_path: Optional[str]) -> Tuple[str, str]:
     """
-    Kør MatAnyone via Python API og returnér (foreground_mp4, alpha_mp4).
-    Understøtter ekstern maske via mask_path (hvis din version gør).
+    Run MatAnyone via Python API and return (foreground_mp4, alpha_mp4).
+    Supports external mask_path if your version allows it.
     """
     if MATANYONE_API is None:
         raise RuntimeError("MatAnyone API not initialized")
@@ -196,7 +201,7 @@ def run_matanyone_python(input_mp4: str, out_dir: str, max_size: int,
         save_frames=False
     )
     if mask_path:
-        kwargs["mask_path"] = mask_path  # ekstern SAM2-maske
+        kwargs["mask_path"] = mask_path  # external SAM2 mask (if supported)
 
     result = MATANYONE_API.process_video(**kwargs)
 
@@ -215,8 +220,8 @@ def run_matanyone_python(input_mp4: str, out_dir: str, max_size: int,
 def run_matanyone_cli(input_mp4: str, out_dir: str, max_size: int,
                       mask_path: Optional[str]) -> Tuple[str, str]:
     """
-    CLI fallback. Opdater commandlinie-argumenter hvis din version bruger andre navne.
-    Forsøger at inkludere --mask_path når muligt.
+    CLI fallback. Update CLI flags if your version uses different names.
+    Tries to include --mask_path when possible.
     """
     ensure_dir(out_dir)
     base = f'--video "{input_mp4}" --out_dir "{out_dir}" --max_size {max_size}'
@@ -239,15 +244,15 @@ def run_matanyone_cli(input_mp4: str, out_dir: str, max_size: int,
             last_err = e
     raise RuntimeError(f"MatAnyone CLI failed: {last_err}")
 
-# ---------------- Compose (ffmpeg; NVENC når muligt) ----------------
+# ---------------- Compose (ffmpeg; NVENC when available) ----------------
 def compose_video(fg_mp4: str, alpha_mp4: str, bg_img: str,
                   duration: float, out_mp4: str, src_video_for_audio: str,
                   use_nvenc: bool) -> str:
     """
-    1) Loop baggrundsbillede til video (samme varighed, 30fps)
+    1) Loop background image to a video (same duration, 30fps)
     2) Alpha merge => RGBA
-    3) Overlay RGBA på baggrund
-    4) Remux original lyd
+    3) Overlay RGBA on background
+    4) Remux original audio
     """
     dur = max(0.1, duration)
     tmp_bg = os.path.join(os.path.dirname(out_mp4), "bg_loop.mp4")
@@ -281,7 +286,7 @@ def process_video_with_background(video_path: str, bg_path: str, out_path: str,
     out_dir = str(workdir / "ma_out")
     ensure_dir(out_dir)
 
-    # --- SAM2: first-frame mask (økonomisk & stabilt) ---
+    # --- SAM2: first-frame mask (cheap & stable) ---
     mask_path = None
     used_sam2 = False
     if run_sam2_mode != "none" and SAM2_AVAILABLE:
