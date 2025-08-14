@@ -30,8 +30,8 @@ RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/c
 # Install other dependencies first (without SAM2)
 RUN pip install fastapi uvicorn[standard] python-multipart transformers pillow numpy opencv-python
 
-# Install MatAnyone dependencies
-RUN pip install matanyone>=1.0.0 omegaconf==2.3.0 hydra-core==1.3.2 easydict==0.1.10 imageio==2.25.0 huggingface-hub>=0.16.0 safetensors>=0.3.0 einops>=0.6.0 scipy>=1.10.0 av>=10.0.0
+# Install MatAnyone dependencies (FIXED LINE)
+RUN pip install git+https://github.com/SHI-Labs/matanyone.git omegaconf==2.3.0 hydra-core==1.3.2 easydict==0.1.10 imageio==2.25.0 huggingface-hub>=0.16.0 safetensors>=0.3.0 einops>=0.6.0 scipy>=1.10.0 av>=10.0.0
 
 # Install SAM2 separately to avoid naming conflicts
 RUN pip install git+https://github.com/facebookresearch/segment-anything-2.git
