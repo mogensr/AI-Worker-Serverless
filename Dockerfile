@@ -37,10 +37,11 @@ RUN python -m pip install --no-cache-dir \
 # ---- Python dependencies ----
 COPY requirements.txt /app/requirements.txt
 
-# Install requirements ONE BY ONE for clear error reporting
+# Install requirements ONE BY ONE (ignore blank lines and comments)
 RUN set -eux; \
-    grep -v '^\s*#' /app/requirements.txt | sed '/^\s*$/d' > /tmp/reqs.clean; \
-    while read -r PKG; do \
+    awk '!/^[[:space:]]*($|#)/ {print}' /app/requirements.txt > /tmp/reqs.clean; \
+    cat -n /tmp/reqs.clean; \
+    while IFS= read -r PKG; do \
         echo "=== Installing: ${PKG} ==="; \
         python -m pip install --no-cache-dir "${PKG}"; \
     done < /tmp/reqs.clean
